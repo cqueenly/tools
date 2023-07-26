@@ -1,0 +1,42 @@
+### transforms string of zips to containsany statement used in triggering
+
+import datetime
+
+input_string = "12345,23456,AB,CD,01234"
+
+# Split the input_string by comma and remove leading/trailing whitespace
+inputs = [item.strip() for item in input_string.split(',')]
+
+# Check if the input is a zip code (5 characters) or state abbreviation (2 characters)
+transformed_inputs = []
+for item in inputs:
+    if item.isdigit() and len(item) == 5:
+        transformed_inputs.append(item)
+    elif item.isalpha() and len(item) == 2:
+        transformed_inputs.append(item)
+    else:
+        print(f"Error: '{item}' is not a valid 5-digit zip code or 2-letter state abbreviation.")
+        exit(1)
+
+# Construct the output string with proper indentation
+output_string = """(
+        (
+               ContainsAny(
+                       PatientAnswer("Contact.CityStateZip"),
+                               ", """ + '|\n                               , '.join(transformed_inputs) + """",
+                       "|"
+               )
+        )
+)"""
+
+# Get the current date and time
+current_datetime = datetime.datetime.now().strftime("%Y%m%d%H%M")
+
+# Create the file name
+file_name = f"format_zip_for_config_{current_datetime}.txt"
+
+# Write the output to the file
+with open(file_name, 'w') as file:
+    file.write(output_string)
+
+print(f"Output written to {file_name}")
