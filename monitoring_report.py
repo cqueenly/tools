@@ -5,12 +5,13 @@ import logging
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 import argparse
+from nis import match
+import re
 
 # Configure logging
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
 
 # Set date-times
 current_datetime = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -64,10 +65,8 @@ def create_monitoring_df(therapeutic_category=None):
                                   == therapeutic_category]
 
     # Exclude campaigns with specific names
-    excluded_campaigns = ['BayCare T65 2023', 'BCBS of Florida AEP 2023', 'BCBS of Florida SEP 2023',
-                          'BCBS of Florida T65 2023', 'Aetna T65 2023', 'Guided Solutions 5-Star 2023',
-                          'e-TeleQuote 5 Star 2023', 'Guided Solutions Med Supp 2023',
-                          'Guided Solutions Med Supp FL 2023', 'SingleCare 2023', 'MercyOne 2023', 'e-TeleQuote AEP 2023']
+    excluded_campaigns = ['Aetna T65 2023','BCBS of Florida AEP 2023','BCBS of Florida SEP 2023','BCBS of Florida T65 2023','BayCare T65 2023','Guided Solutions 5-Star 2023','Guided Solutions Med Supp 2023',
+                          'Guided Solutions Med Supp FL 2023', 'Keen Insurance Services T65 2023', 'Messer Financial Group ACA 2023', 'Senior Financial Group AEP 2023','e-TeleQuote 5 Star 2023', 'e-TeleQuote AEP 2023']
     target_df = target_df[~target_df['campaign'].isin(excluded_campaigns)]
 
     return target_df
@@ -160,10 +159,18 @@ def retrieve_campaign_manufacturer():
         query=campaign_manufacturer_query, server_name='DSMAIN')
     return campaign_manufacturer_df
 
-# ** extract last update and update type (unassignment, pacing change, etc)
-# ** transform date diff variable, add date diff to quick guide
-# ** def calculate_proposed_datediff, add proposed dd to quick guide
+def extract_datediff(datediffs):
+   pattern = r'DateDiffDays\(PatientAnswer\("Required.DateOfBirth"\), GetDate\(\)\)%\d+\s*(?:[<>]=?|<=|>=)\s*(\d+)'
+   match = re.findall(pattern, datediffs)
+   if len(match) > 1:
+       if all(matches == match[0] for matches in match):
+           return match[0]
+       else:
+           return "multiple datediffs"
+   return int(match[0]) if match else 0
 
+# ** extract last update and update type (unassignment, pacing change, etc)
+# ** def calculate_proposed_datediff, add proposed dd to quick guide
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -185,33 +192,17 @@ if __name__ == "__main__":
     monitoring_df = create_monitoring_df(
         therapeutic_category=therapeutic_category)
 
-    # Retrieve campaign manufacturer information
+    # Retrieve campaign information
     campaign_manufacturer_df = retrieve_campaign_manufacturer()
+    campaign_totals_df = create_campaign_totals_df(monitoring_df)
 
     # Generate the filename
     abs_path = os.path.abspath(f"Campaign_Monitoring_{current_datetime}.xlsx")
 
     # Create a Pandas Excel writer using xlsxwriter as the engine.
+    logger.info(f"Creating excel file...")
     writer = pd.ExcelWriter(
         f"Campaign_Monitoring_{current_datetime}.xlsx", engine='xlsxwriter')
-
-    # Write the original DataFrames to separate worksheets
-    logger.info(f"Retrieving pacing projections...")
-    df_10_biz = monitoring_df[monitoring_df['monitor_name']
-                              == '10 bizhr, 5w avg']
-    df_7d = monitoring_df[monitoring_df['monitor_name'] == '7d, 5w avg']
-
-    df_10_biz.to_excel(writer, sheet_name='10 Hour Projection', index=False)
-    df_7d.to_excel(writer, sheet_name='7 Day Projection', index=False)
-
-    # Create the campaign totals DataFrame
-    campaign_totals_df = create_campaign_totals_df(monitoring_df)
-    campaign_manufacturer_df = retrieve_campaign_manufacturer()
-
-    # Save the result to an Excel file
-    logger.info(f"Calculating campaign totals...")
-    campaign_totals_df.to_excel(
-        writer, sheet_name='Campaign Totals', index=False)
 
     # Create the "Quick Guide" sheet
     logger.info(f"Creating quick guide...")
@@ -226,10 +217,12 @@ if __name__ == "__main__":
     quick_guide_df = quick_guide_df.merge(
         campaign_manufacturer_df[['campaign', 'Manufacturer']], on='campaign', how='left')
 
+    # add transformed date diff to quick guide
+    quick_guide_df['datediff'] = quick_guide_df['datediffs'].apply(extract_datediff)
 
     # make pretty
     quick_guide_columns = ['campaign', 'Manufacturer', 'TherapeuticCategory', 'SubscriptionProgram', '% Contract Complete',
-                           'datediffs', 'Status', 'MTD % Complete', 'ProjectedTotal', 'notes']
+                           'datediff', 'Status', 'MTD % Complete', 'ProjectedTotal', 'notes']
     quick_guide_df = quick_guide_df[quick_guide_columns]
     quick_guide_df = quick_guide_df.sort_values(by=['TherapeuticCategory', 'campaign'])
 
@@ -237,7 +230,23 @@ if __name__ == "__main__":
 
     # Save the quick guide df to excel
     quick_guide_df.to_excel(writer, sheet_name='Quick Guide', index=False)
+    
+    
+    # Write the original DataFrames to separate worksheets
+    logger.info(f"Filtering dash projections...")
+    df_10_biz = monitoring_df[monitoring_df['monitor_name']
+                              == '10 bizhr, 5w avg']
+    df_7d = monitoring_df[monitoring_df['monitor_name'] == '7d, 5w avg']
 
+    df_10_biz.to_excel(writer, sheet_name='10 Hour Projection', index=False)
+    df_7d.to_excel(writer, sheet_name='7 Day Projection', index=False)
+
+
+    # Save the result to an Excel file
+    logger.info(f"Calculating campaign totals...")
+    campaign_totals_df.to_excel(
+        writer, sheet_name='Campaign Totals', index=False)
+    
     writer.save()
 
     print(f"Excel file saved to: {abs_path}")
