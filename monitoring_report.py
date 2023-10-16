@@ -2,24 +2,27 @@ import pandas as pd
 import os
 from database_tools import sql_tools as qlt
 import logging
-from datetime import datetime
-from dateutil.relativedelta import relativedelta  # Import relativedelta
+from datetime import datetime, timedelta
+from dateutil.relativedelta import relativedelta
+import argparse
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# Set date-times
 current_datetime = datetime.now().strftime("%Y%m%d_%H%M%S")
+current_date = datetime.now().date()
+first_dom = current_date.replace(day=1)
+last_dom = current_date.replace(day=31)
 
-# Define the start and end of the month
-today = datetime.now().date()
-month_start = today.replace(day=1)
-last_day_of_month = today + relativedelta(day=31)  # Calculate the last day of the current month
 
 def create_monitoring_df(therapeutic_category=None):
-   logger.info("Fetching campaign projection data...")
+    logger.info("Fetching campaign projection data...")
 
-   target_query = """
+    target_query = """
        select distinct output.campaign,
            output.monitor_name,
            output.rate_classification AS Status,
@@ -39,135 +42,202 @@ def create_monitoring_df(therapeutic_category=None):
        ORDER BY campaign
    """
 
-   # Execute the query and get the data as a DataFrame
-   target_df = qlt.execute_query_to_df(query=target_query, server_name='DSMAIN')
+    # Execute the query and get the data as a DataFrame
+    target_df = qlt.execute_query_to_df(
+        query=target_query, server_name='DSMAIN')
 
-   # Filter by therapeutic category if provided
-   if therapeutic_category:
-       logger.info(f"Applying therapeutic category filter: {therapeutic_category}")
-       if therapeutic_category.lower() == 'cm':
-           # Filter to the therapeutic categories assigned to Chelsea
-           chelsea_categories = [
-               'Dermatology', 'Endocrinology', 'Hematology', 'Infectious Disease',
-               'Ophthalmology', 'Other', 'Rare Disease', 'Rheumatology & Bone'
-           ]
-           target_df = target_df[target_df['TherapeuticCategory'].isin(chelsea_categories)]
-       else:
-           # Filter by the specified therapeutic category
-           target_df = target_df[target_df['TherapeuticCategory'] == therapeutic_category]
+    # Filter by therapeutic category if provided
+    if therapeutic_category:
+        logger.info(
+            f"Applying therapeutic category filter: {therapeutic_category}")
+        if therapeutic_category.lower() == 'cm':
+            # Filter to the therapeutic categories assigned to Chelsea
+            chelsea_categories = [
+                'Dermatology', 'Endocrinology', 'Hematology', 'Infectious Disease',
+                'Ophthalmology', 'Other', 'Rare Disease', 'Vaccines'
+            ]
+            target_df = target_df[target_df['TherapeuticCategory'].isin(
+                chelsea_categories)]
+        else:
+            # Filter by the specified therapeutic category
+            target_df = target_df[target_df['TherapeuticCategory']
+                                  == therapeutic_category]
 
-   # Exclude campaigns with specific names
-   excluded_campaigns = ['BayCare T65 2023', 'BCBS of Florida SEP 2023','BCBS of Florida T65 2023', 'Guided Solutions 5-Star 2023','e-TeleQuote 5 Star 2023', 'Guided Solutions Med Supp 2023','Guided Solutions Med Supp FL 2023', 'SingleCare 2023', 'MercyOne 2023']
-   target_df = target_df[~target_df['campaign'].isin(excluded_campaigns)]
+    # Exclude campaigns with specific names
+    excluded_campaigns = ['BayCare T65 2023', 'BCBS of Florida AEP 2023', 'BCBS of Florida SEP 2023',
+                          'BCBS of Florida T65 2023', 'Aetna T65 2023', 'Guided Solutions 5-Star 2023',
+                          'e-TeleQuote 5 Star 2023', 'Guided Solutions Med Supp 2023',
+                          'Guided Solutions Med Supp FL 2023', 'SingleCare 2023', 'MercyOne 2023', 'e-TeleQuote AEP 2023']
+    target_df = target_df[~target_df['campaign'].isin(excluded_campaigns)]
 
-   return target_df
+    return target_df
+
 
 def retrieve_contracted_total(target_df):
-   return target_df[['campaign', 'ContractedTotal']]
+    return target_df[['campaign', 'ContractedTotal']]
+
 
 def retrieve_current_campaign_total():
-   campaign_total_query = f"""
+    campaign_total_query = """
        select distinct groupName, count(distinct portalSessionKey) as CurrentCampaignTotal
        from Messaging_DB.dbo.vCampaignHit hit
        inner join Messaging_DB.dash.DashMonitoringOutput output on hit.groupName = output.campaign
        group by groupName
    """
 
-   campaign_total_df = qlt.execute_query_to_df(query=campaign_total_query, server_name='DSMAIN')
+    campaign_total_df = qlt.execute_query_to_df(
+        query=campaign_total_query, server_name='DSMAIN')
 
-   return campaign_total_df
+    return campaign_total_df
+
 
 def calculate_percent_contract_complete(row, current_campaign_total):
-   campaign_name = row['campaign']
-   matching_row = current_campaign_total[current_campaign_total['groupName'] == campaign_name]
-   if not matching_row.empty:
-       current_total = matching_row.iloc[0]['CurrentCampaignTotal']
-       return (current_total / row['ContractedTotal']) * 100
-   return 0  # Handle the case where there's no matching row
+    campaign_name = row['campaign']
+    matching_row = current_campaign_total[current_campaign_total['groupName'] == campaign_name]
+    if not matching_row.empty:
+        current_total = matching_row.iloc[0]['CurrentCampaignTotal']
+        return (current_total / row['ContractedTotal']) * 100
+    return 0  # Handle the case where there's no matching row
+
 
 def retrieve_monthly_target(target_df):
-   return target_df[['campaign', 'MonthlyTarget']]
+    return target_df[['campaign', 'MonthlyTarget']]
+
 
 def retrieve_current_monthly_total():
-   monthly_total_query = f"""
+    monthly_total_query = f"""
        select distinct groupName, count(distinct portalSessionKey) as CurrentMonthlyTotal
        from Messaging_DB.dbo.vCampaignHit hit
        inner join Messaging_DB.dash.DashMonitoringOutput output on hit.groupName = output.campaign
-       where datekey between '{month_start.strftime('%Y%m%d')}' and '{last_day_of_month.strftime('%Y%m%d')}'
+       where datekey between '{first_dom.strftime('%Y%m%d')}' and '{last_dom.strftime('%Y%m%d')}'
        group by groupName
    """
+    monthly_total_df = qlt.execute_query_to_df(
+        query=monthly_total_query, server_name='DSMAIN')
+    return monthly_total_df
 
-   monthly_total_df = qlt.execute_query_to_df(query=monthly_total_query, server_name='DSMAIN')
-   return monthly_total_df
 
 def calculate_mtd_percentage_completed(row, current_monthly_total):
-   campaign_name = row['campaign']
-   matching_row = current_monthly_total[current_monthly_total['groupName'] == campaign_name]
-   if not matching_row.empty:
-       current_total = matching_row.iloc[0]['CurrentMonthlyTotal']
-       return (current_total / row['MonthlyTarget']) * 100
-   return 0  # Handle the case where there's no matching row
+    campaign_name = row['campaign']
+    matching_row = current_monthly_total[current_monthly_total['groupName']
+                                         == campaign_name]
+    if not matching_row.empty:
+        current_total = matching_row.iloc[0]['CurrentMonthlyTotal']
+        return (current_total / row['MonthlyTarget']) * 100
+    return 0  # Handle the case where there's no matching row
+
 
 def create_campaign_totals_df(target_df):
-   contracted_total = retrieve_contracted_total(target_df)
-   current_campaign_total = retrieve_current_campaign_total()
-   contracted_total['% Contract Complete'] = contracted_total.apply(lambda row: calculate_percent_contract_complete(row, current_campaign_total), axis=1)
+    contracted_total = retrieve_contracted_total(target_df)
+    current_campaign_total = retrieve_current_campaign_total()
+    contracted_total['% Contract Complete'] = contracted_total.apply(
+        lambda row: calculate_percent_contract_complete(row, current_campaign_total), axis=1)
 
-   monthly_target = retrieve_monthly_target(target_df)
-   current_monthly_total = retrieve_current_monthly_total()
-   monthly_target['MTD % Complete'] = monthly_target.apply(lambda row: calculate_mtd_percentage_completed(row, current_monthly_total), axis=1)
+    monthly_target = retrieve_monthly_target(target_df)
+    current_monthly_total = retrieve_current_monthly_total()
+    monthly_target['MTD % Complete'] = monthly_target.apply(
+        lambda row: calculate_mtd_percentage_completed(row, current_monthly_total), axis=1)
+    campaign_totals_df = pd.merge(
+        contracted_total, monthly_target, on='campaign')
 
-   campaign_totals_df = pd.merge(contracted_total, monthly_target, on='campaign')
-   campaign_totals_df = campaign_totals_df.drop_duplicates()
-   return campaign_totals_df
+    # Merge and reorder
+    campaign_totals_df = campaign_totals_df.merge(current_monthly_total[[
+                                                  'groupName', 'CurrentMonthlyTotal']], left_on='campaign', right_on='groupName', how='left')
+    campaign_totals_df = campaign_totals_df[[
+        'campaign', 'ContractedTotal', '% Contract Complete', 'CurrentMonthlyTotal', 'MonthlyTarget', 'MTD % Complete']]
+    campaign_totals_df = campaign_totals_df.drop_duplicates()
+    return campaign_totals_df
+
 
 def retrieve_campaign_manufacturer():
-   campaign_manufacturer_query = """
-       select distinct groupname, label_name
-       from Messaging_DB.dash.DashActiveCampaignLabels
-       where label_category = 'Manufacturer'
-   """
-   campaign_manufacturer_df = qlt.execute_query_to_df(query=campaign_manufacturer_query, server_name='DSMAIN')
-   return campaign_manufacturer_df
+    campaign_manufacturer_query = """
+        select distinct groupname as campaign, label_name AS Manufacturer
+        from Messaging_DB.dash.DashActiveCampaignLabels
+        where label_category = 'Manufacturer'
+    """
+
+    campaign_manufacturer_df = qlt.execute_query_to_df(
+        query=campaign_manufacturer_query, server_name='DSMAIN')
+    return campaign_manufacturer_df
+
+# ** extract last update and update type (unassignment, pacing change, etc)
+# ** transform date diff variable, add date diff to quick guide
+# ** def calculate_proposed_datediff, add proposed dd to quick guide
+
 
 if __name__ == "__main__":
-   parser = argparse.ArgumentParser()
-   parser.add_argument("-cm", "--chelsea_filter", action='store_true', help="Apply Chelsea's therapeutic category filter")
-   parser.add_argument("-tc", "--therapeutic_category", type=str, default=None, help="Filter by therapeutic category")
-   args = parser.parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-cm", "--chelsea_filter", action='store_true',
+                        help="Apply Chelsea's therapeutic category filter")
+    parser.add_argument("-tc", "--therapeutic_category", type=str,
+                        default=None, help="Filter by therapeutic category")
+    args = parser.parse_args()
 
-   logger.info("Starting script...")
+    logger.info("Starting script...")
 
-   # Determine the therapeutic category filter based on arguments
-   if args.chelsea_filter:
-       therapeutic_category = 'cm'
-   else:
-       therapeutic_category = args.therapeutic_category
+    # Determine the therapeutic category filter based on arguments
+    if args.chelsea_filter:
+        therapeutic_category = 'cm'
+    else:
+        therapeutic_category = args.therapeutic_category
 
-   # Create the monitoring DataFrame with optional filters
-   monitoring_df = create_monitoring_df(therapeutic_category=therapeutic_category)
+    # Create the monitoring DataFrame with optional filters
+    monitoring_df = create_monitoring_df(
+        therapeutic_category=therapeutic_category)
 
-   # Generate the filename
-   abs_path = os.path.abspath(f"Campaign_Monitoring_{current_datetime}.xlsx")
-   logger.info(f"Creating Excel file...")
+    # Retrieve campaign manufacturer information
+    campaign_manufacturer_df = retrieve_campaign_manufacturer()
 
-   # Create a Pandas Excel writer using xlsxwriter as the engine.
-   writer = pd.ExcelWriter(f"Campaign_Monitoring_{current_datetime}.xlsx", engine='xlsxwriter')
+    # Generate the filename
+    abs_path = os.path.abspath(f"Campaign_Monitoring_{current_datetime}.xlsx")
 
-   # Write the original DataFrames to separate worksheets
-   df_10_biz = monitoring_df[monitoring_df['monitor_name'] == '10 bizhr, 5w avg']
-   df_7d = monitoring_df[monitoring_df['monitor_name'] == '7d, 5w avg']
+    # Create a Pandas Excel writer using xlsxwriter as the engine.
+    writer = pd.ExcelWriter(
+        f"Campaign_Monitoring_{current_datetime}.xlsx", engine='xlsxwriter')
 
-   df_10_biz.to_excel(writer, sheet_name='10 Hour Projection', index=False)
-   df_7d.to_excel(writer, sheet_name='7 Day Projection', index=False)
+    # Write the original DataFrames to separate worksheets
+    logger.info(f"Retrieving pacing projections...")
+    df_10_biz = monitoring_df[monitoring_df['monitor_name']
+                              == '10 bizhr, 5w avg']
+    df_7d = monitoring_df[monitoring_df['monitor_name'] == '7d, 5w avg']
 
-   # Create the campaign totals DataFrame
-   campaign_totals_df = create_campaign_totals_df(monitoring_df)
-   campaign_manufacturer_df = retrieve_campaign_manufacturer()
+    df_10_biz.to_excel(writer, sheet_name='10 Hour Projection', index=False)
+    df_7d.to_excel(writer, sheet_name='7 Day Projection', index=False)
 
-   # Save the result to an Excel file
-   campaign_totals_df.to_excel(writer, sheet_name='Campaign Totals', index=False)
+    # Create the campaign totals DataFrame
+    campaign_totals_df = create_campaign_totals_df(monitoring_df)
+    campaign_manufacturer_df = retrieve_campaign_manufacturer()
 
-   writer.save()
+    # Save the result to an Excel file
+    logger.info(f"Calculating campaign totals...")
+    campaign_totals_df.to_excel(
+        writer, sheet_name='Campaign Totals', index=False)
 
-   print(f"Excel file saved to: {abs_path}")
+    # Create the "Quick Guide" sheet
+    logger.info(f"Creating quick guide...")
+    quick_guide_df = monitoring_df[monitoring_df['monitor_name'] == '10 bizhr, 5w avg'][[
+        'campaign', 'TherapeuticCategory','datediffs', 'Status', 'SubscriptionProgram', 'ProjectedTotal', 'notes']]
+
+    # add campaign totals to quick guide
+    quick_guide_df = quick_guide_df.merge(
+        campaign_totals_df[['campaign', '% Contract Complete', 'MTD % Complete']], on='campaign', how='left')
+
+    # add Manufacturer to quick guide
+    quick_guide_df = quick_guide_df.merge(
+        campaign_manufacturer_df[['campaign', 'Manufacturer']], on='campaign', how='left')
+
+
+    # make pretty
+    quick_guide_columns = ['campaign', 'Manufacturer', 'TherapeuticCategory', 'SubscriptionProgram', '% Contract Complete',
+                           'datediffs', 'Status', 'MTD % Complete', 'ProjectedTotal', 'notes']
+    quick_guide_df = quick_guide_df[quick_guide_columns]
+    quick_guide_df = quick_guide_df.sort_values(by=['TherapeuticCategory', 'campaign'])
+
+    # ** add personal notes to quick guide
+
+    # Save the quick guide df to excel
+    quick_guide_df.to_excel(writer, sheet_name='Quick Guide', index=False)
+
+    writer.save()
+
+    print(f"Excel file saved to: {abs_path}")
