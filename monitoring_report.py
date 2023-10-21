@@ -19,6 +19,9 @@ current_date = datetime.now().date()
 first_dom = current_date.replace(day=1)
 last_dom = current_date.replace(day=31)
 
+######################## CAMPAIGN PROJECTIONS ###########################
+########################################################################
+
 
 def create_monitoring_df(therapeutic_category=None):
     logger.info("Fetching campaign projection data...")
@@ -53,15 +56,17 @@ def create_monitoring_df(therapeutic_category=None):
 
     # replace monthly target with custom target if provided
     logger.info("Incorperating custom targets...")
-    target_df['MonthlyTarget']=target_df['campaign'].map(c.custom_targets).fillna(target_df['MonthlyTarget'])
-                                        
-    # recalculate projectedtotal based on custom_target if provided
+    target_df['MonthlyTarget'] = target_df['campaign'].map(
+        c.custom_targets).fillna(target_df['MonthlyTarget'])
+
+    # recalculate projected total based on custom_target if provided
     target_df['ProjectedTotal'] = target_df.apply(
-        lambda row: round((row['TotalMonthProjection'] / c.custom_targets.get(row['campaign'], row['MonthlyTarget'])) * 100, 2)
+        lambda row: round((row['TotalMonthProjection'] / c.custom_targets.get(
+            row['campaign'], row['MonthlyTarget'])) * 100, 2)
         if row['campaign'] in c.custom_targets else row['ProjectedTotal'],
         axis=1
     )
-    
+
     # Filter by therapeutic category if provided
     if therapeutic_category:
         logger.info(
@@ -74,11 +79,16 @@ def create_monitoring_df(therapeutic_category=None):
             # Filter by the specified therapeutic category
             target_df = target_df[target_df['TherapeuticCategory']
                                   == therapeutic_category]
-            
+
     # Exclude campaigns with specific names
     target_df = target_df[~target_df['campaign'].isin(c.excluded_campaigns)]
 
     return target_df
+
+# ** stream level targets, stream level reports
+
+######################## CAMPAIGN TOTALS ###########################
+####################################################################
 
 
 def retrieve_contracted_total(target_df):
@@ -104,7 +114,7 @@ def calculate_percent_contract_complete(row, current_campaign_total):
     matching_row = current_campaign_total[current_campaign_total['groupName'] == campaign_name]
     if not matching_row.empty:
         current_total = matching_row.iloc[0]['CurrentCampaignTotal']
-        return round(((current_total / row['ContractedTotal']) * 100),2)
+        return round(((current_total / row['ContractedTotal']) * 100), 2)
     return 0  # Handle the case where there's no matching row
 
 
@@ -132,7 +142,7 @@ def calculate_mtd_percentage_completed(row, current_monthly_total):
     if not matching_row.empty:
         current_total = matching_row.iloc[0]['CurrentMonthlyTotal']
         if campaign_name in c.custom_targets:
-            return round((current_total / c.custom_targets[campaign_name])* 100, 2)
+            return round((current_total / c.custom_targets[campaign_name]) * 100, 2)
         else:
             return round((current_total / row['MonthlyTarget']) * 100, 2)
     return 0  # Handle the case where there's no matching row
@@ -157,36 +167,32 @@ def create_campaign_totals_df(target_df):
     campaign_totals_df = campaign_totals_df[[
         'campaign', 'ContractedTotal', '% Contract Complete', 'CurrentMonthlyTotal', 'MonthlyTarget', 'MTD % Complete']]
     campaign_totals_df = campaign_totals_df.drop_duplicates()
-    
-    campaign_totals_df = campaign_totals_df.sort_values(by=['% Contract Complete'], ascending=False)
+
+    campaign_totals_df = campaign_totals_df.sort_values(
+        by=['% Contract Complete'], ascending=False)
     return campaign_totals_df
 
 
-def retrieve_campaign_manufacturer():
-    campaign_manufacturer_query = """
-        select distinct groupname as campaign, label_name AS Manufacturer
-        from Messaging_DB.dash.DashActiveCampaignLabels
-        where label_category = 'Manufacturer'
-    """
+######################## DATEDIFF PROPOSALS ########################
+####################################################################
 
-    campaign_manufacturer_df = qlt.execute_query_to_df(
-        query=campaign_manufacturer_query, server_name='DSMAIN')
-    return campaign_manufacturer_df
+# ** extract last update and update type (unassignment, pacing change, etc)
 
 def extract_datediff(datediffs):
-   pattern = r'DateDiffDays\(PatientAnswer\("Required.DateOfBirth"\), GetDate\(\)\)%\d+\s*(?:[<>]=?|<=|>=)\s*(\d+)'
-   match = re.findall(pattern, datediffs)
-   if len(match) > 1:
-       if all(matches == match[0] for matches in match):
-           return match[0]
-       else:
-           return "multiple datediffs"
-   return int(match[0]) if match else 0
+    pattern = r'DateDiffDays\(PatientAnswer\("Required.DateOfBirth"\), GetDate\(\)\)%\d+\s*(?:[<>]=?|<=|>=)\s*(\d+)'
+    match = re.findall(pattern, datediffs)
+    if len(match) > 1:
+        if all(matches == match[0] for matches in match):
+            return match[0]
+        else:
+            return "multiple datediffs"
+    return int(match[0]) if match else 0
+
 
 def calculate_proposed_datediff(row):
     datediff = row['datediff']
-    current_projected= row['ProjectedTotal']
-    desired_projection=103
+    current_projected = row['ProjectedTotal']
+    desired_projection = 103
 
     # # no dd for subscription
     # if is_subscription:
@@ -199,36 +205,55 @@ def calculate_proposed_datediff(row):
         # avoid typeerror by converting projected total to numeric and ensuring its valid
         current_projected = pd.to_numeric(current_projected, errors='coerce')
         datediff = pd.to_numeric(datediff, errors='coerce')
-        
+
         # check if the dd is 99/999
-        if pd.notnull(datediff) and datediff in(99,999):
+        if pd.notnull(datediff) and datediff in (99, 999):
             return None
-        
+
         if pd.notnull(current_projected):
-            proposed_datediff = 100 - ((desired_projection *(100 - datediff)) / current_projected)
+            proposed_datediff = 100 - \
+                ((desired_projection * (100 - datediff)) / current_projected)
             return round(proposed_datediff, 1)
         else:
             return None
     except ZeroDivisionError:
         return None
-    
-### this doesn't work >:( 
-# def apply_subscription_rules(row):
-#     subscription_program = row['SubscriptionProgram']
-#     proposed_datediff = row['Proposed Datediff']
-#     datediff = row['datediff']
-    
-#     if subscription_program == 'true' and datediff == 0:
-#         return None
-#     elif subscription_program == 'true':
-#         return 0
-#     else:
-#         return proposed_datediff
+
+
+# this doesn't work >:(
+def apply_subscription_rules(row):
+    subscription_program = row['SubscriptionProgram']
+    proposed_datediff = row['Proposed Datediff']
+    datediff = row['datediff']
+
+    if subscription_program == 'true' and datediff == 0:
+        return None
+    elif subscription_program == 'true':
+        return 0
+    else:
+        return proposed_datediff
+
+# ** apply rules to subscription and maxed out campaigns
+# ** only propose dated diffs 0-100
+
+
+def retrieve_campaign_manufacturer():  # reference to quickly apply datediff changes
+    campaign_manufacturer_query = """
+        select distinct groupname as campaign, label_name AS Manufacturer
+        from Messaging_DB.dash.DashActiveCampaignLabels
+        where label_category = 'Manufacturer'
+    """
+
+    campaign_manufacturer_df = qlt.execute_query_to_df(
+        query=campaign_manufacturer_query, server_name='DSMAIN')
+    return campaign_manufacturer_df
+
 
 # ** extract last update and update type (unassignment, pacing change, etc)
 # ** apply rules to subscription and maxed out campaigns
 # ** only propose dated diffs 0-100
 # ** stream level targets, stream level reports
+# ** resolve returning-a-view-versus-a-copy
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -265,21 +290,21 @@ if __name__ == "__main__":
     # Create the "Quick Guide" sheet
     logger.info(f"Creating quick guide...")
     quick_guide_df = monitoring_df[monitoring_df['monitor_name'] == '10 bizhr, 5w avg'][[
-        'campaign', 'TherapeuticCategory','datediffs', 'Status', 'SubscriptionProgram', 'ProjectedTotal', 'notes']]
-    
-    
+        'campaign', 'TherapeuticCategory', 'datediffs', 'Status', 'SubscriptionProgram', 'ProjectedTotal', 'notes']]
+
     # add transformed date diff to quick guide
-    quick_guide_df['datediff'] = quick_guide_df['datediffs'].apply(extract_datediff)
-    
+    quick_guide_df['datediff'] = quick_guide_df['datediffs'].apply(
+        extract_datediff)
+
     # Calculate propsed datediff and add it to the df
-    quick_guide_df['Proposed Datediff']= quick_guide_df.apply(
+    quick_guide_df['Proposed Datediff'] = quick_guide_df.apply(
         lambda row: calculate_proposed_datediff(row), axis=1)
-        #lambda row: calculate_proposed_datediff(datediff=row['datediff'], current_projected=row['ProjectedTotal']), is_subscription=is_subscription, axis=1)
-    
+    # lambda row: calculate_proposed_datediff(datediff=row['datediff'], current_projected=row['ProjectedTotal']), is_subscription=is_subscription, axis=1)
+
     # Apply subscription rules to proposed datediff
-    quick_guide_df['Proposed Datediff']= quick_guide_df.apply(
+    quick_guide_df['Proposed Datediff'] = quick_guide_df.apply(
         lambda row: apply_subscription_rules(row), axis=1)
-    
+
     # add campaign totals to quick guide
     quick_guide_df = quick_guide_df.merge(
         campaign_totals_df[['campaign', '% Contract Complete', 'MTD % Complete']], on='campaign', how='left')
@@ -287,7 +312,7 @@ if __name__ == "__main__":
     # add Manufacturer to quick guide
     quick_guide_df = quick_guide_df.merge(
         campaign_manufacturer_df[['campaign', 'Manufacturer']], on='campaign', how='left')
-    
+
     # add personal notes to quick guide
     quick_guide_df['My Notes'] = quick_guide_df['campaign'].map(c.my_notes)
 
@@ -302,12 +327,12 @@ if __name__ == "__main__":
     quick_guide_columns = ['campaign', 'Manufacturer', 'Therapeutic Category', 'Subscription', '% Contract Complete',
                            'datediff', 'Status', 'Current %', '10 hr Projected %', 'Proposed Datediff', 'My Notes', 'AI Notes']
     quick_guide_df = quick_guide_df[quick_guide_columns]
-    quick_guide_df = quick_guide_df.sort_values(by=['Therapeutic Category', 'campaign'])
+    quick_guide_df = quick_guide_df.sort_values(
+        by=['Therapeutic Category', 'campaign'])
 
     # Save the quick guide df to excel
     quick_guide_df.to_excel(writer, sheet_name='Quick Guide', index=False)
-    
-    
+
     # Write the original DataFrames to separate worksheets
     logger.info(f"Filtering dash projections...")
     df_10_biz = monitoring_df[monitoring_df['monitor_name']
@@ -317,12 +342,11 @@ if __name__ == "__main__":
     df_10_biz.to_excel(writer, sheet_name='10 Hour Projection', index=False)
     df_7d.to_excel(writer, sheet_name='7 Day Projection', index=False)
 
-
     # Save the result to an Excel file
     logger.info(f"Calculating campaign totals...")
     campaign_totals_df.to_excel(
         writer, sheet_name='Campaign Totals', index=False)
-    
+
     writer.save()
 
     print(f"Excel file saved to: {abs_path}")
