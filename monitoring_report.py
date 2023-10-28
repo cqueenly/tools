@@ -2,8 +2,7 @@ import pandas as pd
 import os
 from database_tools import sql_tools as qlt
 import logging
-from datetime import datetime, timedelta
-from dateutil.relativedelta import relativedelta
+from datetime import datetime
 import argparse
 import re
 import constants as c
@@ -21,7 +20,6 @@ last_dom = current_date.replace(day=31)
 
 ######################## CAMPAIGN PROJECTIONS ###########################
 ########################################################################
-
 
 def create_monitoring_df(therapeutic_category=None):
     logger.info("Fetching campaign projection data...")
@@ -186,20 +184,13 @@ def extract_datediff(datediffs):
             return match[0]
         else:
             return "multiple datediffs"
-    return int(match[0]) if match else 0
+    return int(match[0]) if match and match[0].isdigit() else 0
 
 
 def calculate_proposed_datediff(row):
     datediff = row['datediff']
     current_projected = row['ProjectedTotal']
     desired_projection = 103
-
-    # # no dd for subscription
-    # if is_subscription:
-    #     if datediff == 0:
-    #         return None
-    #     else:
-    #         return 0
 
     try:
         # avoid typeerror by converting projected total to numeric and ensuring its valid
@@ -220,21 +211,46 @@ def calculate_proposed_datediff(row):
         return None
 
 
-# this doesn't work >:(
+def apply_datediff_restrictions(row):
+    proposed_datediff = row['Proposed Datediff']
+    current = row['MTD % Complete']
+    datediff = row['datediff']
+    datediff = pd.to_numeric(datediff, errors='coerce')
+    if pd.notnull(datediff):
+        if proposed_datediff > 100:
+            return 99
+        if proposed_datediff < 0:
+            return 0
+        if proposed_datediff == 100:
+            return None
+        if proposed_datediff < 1 and datediff == 0:
+            return None
+    if current >=100 and isinstance(datediff,int) and "Survey Control" not in row['campaign']:
+        if datediff in [99, 999]:
+            return None
+        else:
+            return 999
+    if current >=100 and "Survey Control" in row['campaign']:
+        return None
+        # this doesn't work >:(  all
+    if (pd.isnull(datediff) or pd.isna(datediff) or datediff == 0) and proposed_datediff <= 1:
+        return None
+    else:
+        return proposed_datediff
+
+
 def apply_subscription_rules(row):
     subscription_program = row['SubscriptionProgram']
     proposed_datediff = row['Proposed Datediff']
     datediff = row['datediff']
+    campaign = row['campaign']
 
-    if subscription_program == 'true' and datediff == 0:
+    if (subscription_program == 1 or campaign in c.maxed_out) and pd.to_numeric(datediff, errors='coerce') == 0:
         return None
-    elif subscription_program == 'true':
+    elif (subscription_program == 1 or campaign in c.maxed_out):
         return 0
     else:
         return proposed_datediff
-
-# ** apply rules to subscription and maxed out campaigns
-# ** only propose dated diffs 0-100
 
 
 def retrieve_campaign_manufacturer():  # reference to quickly apply datediff changes
@@ -250,8 +266,6 @@ def retrieve_campaign_manufacturer():  # reference to quickly apply datediff cha
 
 
 # ** extract last update and update type (unassignment, pacing change, etc)
-# ** apply rules to subscription and maxed out campaigns
-# ** only propose dated diffs 0-100
 # ** stream level targets, stream level reports
 # ** resolve returning-a-view-versus-a-copy
 
@@ -291,23 +305,28 @@ if __name__ == "__main__":
     logger.info(f"Creating quick guide...")
     quick_guide_df = monitoring_df[monitoring_df['monitor_name'] == '10 bizhr, 5w avg'][[
         'campaign', 'TherapeuticCategory', 'datediffs', 'Status', 'SubscriptionProgram', 'ProjectedTotal', 'notes']]
+    
+    # add campaign totals to quick guide
+    quick_guide_df = quick_guide_df.merge(
+        campaign_totals_df[['campaign', '% Contract Complete', 'MTD % Complete']], on='campaign', how='left')
 
     # add transformed date diff to quick guide
     quick_guide_df['datediff'] = quick_guide_df['datediffs'].apply(
         extract_datediff)
+    quick_guide_df['datediff'].apply(
+        pd.to_numeric, errors='coerce', downcast='integer')
 
     # Calculate propsed datediff and add it to the df
     quick_guide_df['Proposed Datediff'] = quick_guide_df.apply(
         lambda row: calculate_proposed_datediff(row), axis=1)
     # lambda row: calculate_proposed_datediff(datediff=row['datediff'], current_projected=row['ProjectedTotal']), is_subscription=is_subscription, axis=1)
 
+    quick_guide_df['Proposed Datediff'] = quick_guide_df.apply(
+        lambda row: apply_datediff_restrictions(row), axis=1)
+
     # Apply subscription rules to proposed datediff
     quick_guide_df['Proposed Datediff'] = quick_guide_df.apply(
         lambda row: apply_subscription_rules(row), axis=1)
-
-    # add campaign totals to quick guide
-    quick_guide_df = quick_guide_df.merge(
-        campaign_totals_df[['campaign', '% Contract Complete', 'MTD % Complete']], on='campaign', how='left')
 
     # add Manufacturer to quick guide
     quick_guide_df = quick_guide_df.merge(
@@ -349,4 +368,16 @@ if __name__ == "__main__":
 
     writer.save()
 
-    print(f"Excel file saved to: {abs_path}")
+    logger.info(f"Excel file saved to: {abs_path}")
+
+
+# campaigns =['Sotyktu 2023', 'Reblozyl 2023']
+# data_types = {}
+# for campaign in campaigns:
+#    campaign_subset = quick_guide_df[quick_guide_df['campaign'] == campaign]
+#    data_types[campaign] = campaign_subset['datediff'].dtype
+# print(data_types)
+
+# unique_values = quick_guide_df[quick_guide_df['campaign'] == 'Sotyktu 2023']['datediff'].unique()
+
+# print(unique_values)
